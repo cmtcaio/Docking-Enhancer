@@ -105,6 +105,71 @@ class AndroidInputDeviceRepositoryTest {
     }
 
     @Test
+    fun twoXboxNamedPadsKeepSeparateInternalAndExternalNodes() {
+        val candidates = listOf(
+            ControllerCandidate("Xbox Wireless Controller", ODIN_VENDOR, 0x0112, 1, "odin"),
+            ControllerCandidate("Xbox Wireless Controller", ODIN_VENDOR, 0x0112, 2, "external"),
+        )
+        val entries = listOf(
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0112, "event7"),
+            procEntry("Xbox Wireless Controller", BUS_BLUETOOTH, 0x045e, 0x0b13, "event8"),
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0112, "event9"),
+        )
+        val devices = repository.resolveSameNameOdinControllers(candidates, entries)
+
+        assertEquals(2, devices?.size)
+        assertEquals("/dev/input/event7", devices?.get(0)?.path)
+        assertTrue(devices?.get(0)?.isKnownInternal == true)
+        assertNull(devices?.get(0)?.hideNodePath)
+        assertEquals("/dev/input/event8", devices?.get(1)?.path)
+        assertFalse(devices?.get(1)?.isInternal == true)
+        assertEquals("/dev/input/event9", devices?.get(1)?.hideNodePath)
+    }
+
+    @Test
+    fun externalXboxFallsBackToOdinTwinWhenBluetoothNodeIsAbsent() {
+        val repo = AndroidInputDeviceRepository(
+            pathExists = { it != "/dev/input/event8" },
+        )
+        val candidates = listOf(
+            ControllerCandidate("Xbox Wireless Controller", ODIN_VENDOR, 0x0112, 1, "odin"),
+            ControllerCandidate("Xbox Wireless Controller", ODIN_VENDOR, 0x0112, 2, "external"),
+        )
+        val entries = listOf(
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0112, "event7"),
+            procEntry("Xbox Wireless Controller", BUS_BLUETOOTH, 0x045e, 0x0b13, "event8"),
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0112, "event9"),
+        )
+        val devices = repo.resolveSameNameOdinControllers(candidates, entries)
+
+        assertEquals(2, devices?.size)
+        assertEquals("/dev/input/event7", devices?.get(0)?.path)
+        assertEquals("/dev/input/event9", devices?.get(1)?.path)
+        assertEquals("/dev/input/event9", devices?.get(1)?.hideNodePath)
+    }
+
+    @Test
+    fun hiddenExternalXboxDoesNotMakeBuiltInPadDisappear() {
+        val repo = AndroidInputDeviceRepository(
+            pathExists = { it != "/dev/input/event9" },
+            mirrorRunningProvider = { true },
+            hiddenSourcePathProvider = { "/dev/input/event9" },
+        )
+        val entries = listOf(
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0112, "event7"),
+            procEntry("Xbox Wireless Controller", BUS_BLUETOOTH, 0x045e, 0x0b13, "event8"),
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0112, "event9"),
+        )
+        val devices = repo.resolveSameNameOdinControllers(
+            listOf(ControllerCandidate("Xbox Wireless Controller", ODIN_VENDOR, 0x0112, 1, "odin")),
+            entries,
+        )
+        assertEquals(1, devices?.size)
+        assertEquals("/dev/input/event7", devices?.single()?.path)
+        assertTrue(devices?.single()?.isKnownInternal == true)
+    }
+
+    @Test
     fun internalControllerInOdinModeIsClassifiedAsInternal() {
         val candidate = ControllerCandidate(
             name = "Odin Controller",
