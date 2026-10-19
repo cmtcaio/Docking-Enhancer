@@ -65,19 +65,137 @@ internal class AndroidInputDeviceRepository(
 
         val mirroredNames = computeMirroredNames(procEntries)
 
-        val framework = InputDevice.getDeviceIds()
+        val frameworkCandidates = InputDevice.getDeviceIds()
             .asSequence()
             .mapNotNull { id -> InputDevice.getDevice(id) }
             .filter { device -> isPhysicalGameController(device) }
             .map { it.toCandidate() }
-            .mapNotNull { candidate -> resolveControllerDevice(candidate, procEntries, mirroredNames) }
-            .distinctBy { it.path }
             .toList()
+
+        // Odin Xbox mode and a Bluetooth Xbox controller can share the *same name*.
+        // Resolve that ambiguous group together, so both framework candidates cannot
+        // accidentally be mapped to the very same /proc device.
+        val framework = frameworkCandidates.groupBy { it.name.lowercase() }
+            .values.flatMap { group ->
+                resolveSameNameOdinControllers(group, procEntries)
+                    ?: group.mapNotNull { resolveControllerDevice(it, procEntries, mirroredNames) }
+            }
+            .distinctBy { it.path }
 
         val devices = (framework + hiddenSourceDevice(framework, procEntries))
             .sortedBy { it.controllerNumber }
 
         return resolveInternalController(devices, manualInternalGuidProvider())
+    }
+
+    /**
+     * Odin 2 in Xbox mode names its internal pad "Xbox Wireless Controller", exactly
+     * like a paired Bluetooth Xbox controller. The firmware also exposes an Odin-
+     * vendor twin of the external pad. The usual by-name resolver can then resolve
+     * both framework candidates to the external Bluetooth entry, hiding the actual
+     * internal controller from the app.
+     *
+     * Only use the special path when we can see the genuine Bluetooth/USB external
+     * controller and at least two different Odin-signature event nodes with that
+     * name. Reserve the earliest Odin event as the built-in pad. Event ordering is
+     * an Odin-specific heuristic and must be validated on the physical device.
+     */
+    internal fun resolveSameNameOdinControllers(
+        candidates: List<ControllerCandidate>,
+        entries: List<ProcInputEntry>,
+    ): List<ControllerDevice>? {
+        if (candidates.isEmpty()) return null
+        val name = candidates.first().name.lowercase()
+        if (candidates.any { it.name.lowercase() != name }) return null
+
+        val sameName = entries.filter { it.name.lowercase() == name }
+        val odinNodes = sameName.filter {
+            it.isInternalControllerSignature && pathExists(it.path)
+        }.sortedBy { it.eventNumber }
+        val externalIdentities = sameName.filter {
+            it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS && it.vendorId != 0
+        }
+        // While mirroring, Android may only list the built-in pad: the external
+        // input node is deliberately unlinked, but its /proc record remains.
+        // Keep the internal mapped to its real Odin node, never the Bluetooth pad.
+        if (candidates.size == 1 &&
+            mirrorRunningProvider() && hiddenSourcePathProvider() != null &&
+            externalIdentities.isNotEmpty()
+        ) {
+            val builtIn = odinNodes.firstOrNull { it.path != hiddenSourcePathProvider() }
+                ?: return null
+            val candidate = candidates.single()
+            return listOf(
+                ControllerDevice(
+                    name = builtIn.name,
+                    path = builtIn.path,
+                    guid = candidate.guid,
+                    controllerNumber = candidate.controllerNumber,
+                    handlers = builtIn.handlers,
+                    isInternal = true,
+                    isKnownInternal = true,
+                )
+            )
+        }
+        // No ambiguity: don't change the working default behavior.
+        if (candidates.size < 2 || odinNodes.size < 2 || externalIdentities.isEmpty()) return null
+
+        val ordered = candidates.sortedBy {
+            if (it.controllerNumber > 0) it.controllerNumber else Int.MAX_VALUE
+        }
+        val internalCandidate = ordered.firstOrNull {
+            matchedInternalSignature(it.vendorId, it.productId) != null
+        } ?: return null
+
+        val internalNode = odinNodes.first()
+        val externalTwin = odinNodes.firstOrNull { it.path != internalNode.path }
+        val claimed = mutableSetOf(internalNode.path)
+
+        return ordered.mapNotNull { candidate ->
+            if (candidate === internalCandidate) {
+                ControllerDevice(
+                    name = internalNode.name,
+                    path = internalNode.path,
+                    guid = candidate.guid,
+                    controllerNumber = candidate.controllerNumber,
+                    handlers = internalNode.handlers,
+                    isInternal = true,
+                    isKnownInternal = true,
+                    hideNodePath = null,
+                    mappingKey = null,
+                )
+            } else {
+                // The real Bluetooth node may not exist under /dev on Odin firmware.
+                // In that case the external Odin twin is the source AND hide target.
+                val externalNode = sameName.asSequence()
+                    .filter {
+                        it.path !in claimed && pathExists(it.path) &&
+                            (it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS || it.isInternalControllerSignature)
+                    }
+                    .sortedWith(
+                        compareByDescending<ProcInputEntry> {
+                            candidate.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
+                                it.vendorId == candidate.vendorId &&
+                                it.productId == candidate.productId
+                        }.thenByDescending { it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS }
+                            .thenBy { it.eventNumber }
+                    )
+                    .firstOrNull() ?: return@mapNotNull null
+                claimed += externalNode.path
+                ControllerDevice(
+                    name = externalNode.name,
+                    path = externalNode.path,
+                    guid = candidate.guid,
+                    controllerNumber = candidate.controllerNumber,
+                    handlers = externalNode.handlers,
+                    isInternal = false,
+                    isKnownInternal = false,
+                    // Never unlink the internal node even though it has the same name.
+                    hideNodePath = externalTwin?.path?.takeIf { it != internalNode.path },
+                    mappingKey = resolveMappingKey(externalNode.name, entries),
+                )
+            }
+        }
     }
 
     // When the hide-external feature has unlinked the mirror source's /dev node, the framework drops

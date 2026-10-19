@@ -57,7 +57,8 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField "boolean", "FORCE_DOCK_MODE_FOR_DEV", "true"
+            // Preserve dock-only automation in the test APK.
+            buildConfigField "boolean", "FORCE_DOCK_MODE_FOR_DEV", "false"
         }
 
         release {
