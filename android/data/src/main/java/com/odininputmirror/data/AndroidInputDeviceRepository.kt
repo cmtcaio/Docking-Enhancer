@@ -115,8 +115,30 @@ internal class AndroidInputDeviceRepository(
         val externalIdentities = sameName.filter {
             it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS && it.vendorId != 0
         }
+        // While mirroring, Android may only list the built-in pad: the external
+        // input node is deliberately unlinked, but its /proc record remains.
+        // Keep the internal mapped to its real Odin node, never the Bluetooth pad.
+        if (candidates.size == 1 &&
+            mirrorRunningProvider() && hiddenSourcePathProvider() != null &&
+            externalIdentities.isNotEmpty()
+        ) {
+            val builtIn = odinNodes.firstOrNull { it.path != hiddenSourcePathProvider() }
+                ?: return null
+            val candidate = candidates.single()
+            return listOf(
+                ControllerDevice(
+                    name = builtIn.name,
+                    path = builtIn.path,
+                    guid = candidate.guid,
+                    controllerNumber = candidate.controllerNumber,
+                    handlers = builtIn.handlers,
+                    isInternal = true,
+                    isKnownInternal = true,
+                )
+            )
+        }
         // No ambiguity: don't change the working default behavior.
-        if (odinNodes.size < 2 || externalIdentities.isEmpty()) return null
+        if (candidates.size < 2 || odinNodes.size < 2 || externalIdentities.isEmpty()) return null
 
         val ordered = candidates.sortedBy {
             if (it.controllerNumber > 0) it.controllerNumber else Int.MAX_VALUE
