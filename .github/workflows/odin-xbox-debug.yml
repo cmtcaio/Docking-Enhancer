@@ -3,6 +3,8 @@ name: Build Odin Xbox fix
 on:
   push:
     branches: [fix/odin-xbox-same-name]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
